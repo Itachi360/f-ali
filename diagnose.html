@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>تشخيص PWA</title>
+<style>
+  body{font-family:Arial,sans-serif;background:#011c16;color:#fff;padding:1.5rem;line-height:1.8}
+  h1{color:#fbbf24;font-size:1.3rem;margin-bottom:1rem}
+  .row{background:#064e3b;border-radius:.5rem;padding:.75rem 1rem;margin-bottom:.6rem;display:flex;justify-content:space-between;align-items:center;font-size:.9rem}
+  .ok{color:#34d399;font-weight:bold}
+  .fail{color:#f87171;font-weight:bold}
+  .warn{color:#fbbf24;font-weight:bold}
+  pre{background:#022c22;padding:1rem;border-radius:.5rem;font-size:.75rem;overflow:auto;white-space:pre-wrap}
+  button{background:#f59e0b;color:#011c16;border:none;padding:.6rem 1.2rem;border-radius:.5rem;font-weight:bold;margin-top:1rem;cursor:pointer}
+</style>
+</head>
+<body>
+<h1>🔍 تشخيص جاهزية PWA للتثبيت</h1>
+<div id="results">جارٍ الفحص...</div>
+<pre id="log"></pre>
+<button onclick="location.reload()">إعادة الفحص</button>
+
+<script>
+const results = document.getElementById('results');
+const logEl = document.getElementById('log');
+let logs = [];
+
+function log(msg) {
+  logs.push(msg);
+  logEl.textContent = logs.join('\n');
+}
+
+function row(label, status, detail) {
+  const cls = status === true ? 'ok' : status === false ? 'fail' : 'warn';
+  const icon = status === true ? '✅' : status === false ? '❌' : '⚠️';
+  return `<div class="row"><span>${label}</span><span class="${cls}">${icon} ${detail}</span></div>`;
+}
+
+async function runDiagnostics() {
+  let html = '';
+
+  // 1. HTTPS check
+  const isSecure = location.protocol === 'https:' || location.hostname === 'localhost';
+  html += row('HTTPS / localhost', isSecure, isSecure ? 'متصل بأمان' : `البروتوكول: ${location.protocol}`);
+  log(`Protocol: ${location.protocol}, Host: ${location.hostname}`);
+
+  // 2. Manifest fetch
+  let manifestOk = false, manifestData = null;
+  try {
+    const res = await fetch('/manifest.json');
+    log(`Manifest fetch status: ${res.status}, content-type: ${res.headers.get('content-type')}`);
+    if (res.ok) {
+      manifestData = await res.json();
+      manifestOk = true;
+    }
+  } catch (e) {
+    log(`Manifest fetch error: ${e.message}`);
+  }
+  html += row('manifest.json يُحمَّل', manifestOk, manifestOk ? 'تم التحميل بنجاح' : 'فشل التحميل — تحقق من 404');
+
+  if (manifestData) {
+    html += row('name', !!manifestData.name, manifestData.name || 'مفقود');
+    html += row('short_name', !!manifestData.short_name, manifestData.short_name || 'مفقود');
+    html += row('display: standalone', manifestData.display === 'standalone', manifestData.display || 'مفقود');
+    html += row('start_url', !!manifestData.start_url, manifestData.start_url || 'مفقود');
+    html += row('scope', !!manifestData.scope, manifestData.scope || 'مفقود');
+
+    const icons = manifestData.icons || [];
+    const has192 = icons.some(i => i.sizes && i.sizes.includes('192'));
+    const has512 = icons.some(i => i.sizes && i.sizes.includes('512'));
+    html += row('أيقونة 192x192', has192, has192 ? 'موجودة' : 'مفقودة');
+    html += row('أيقونة 512x512', has512, has512 ? 'موجودة' : 'مفقودة');
+
+    // تحقق من تحميل الأيقونات فعلياً
+    for (const icon of icons.slice(0, 3)) {
+      try {
+        const r = await fetch(icon.src);
+        log(`Icon ${icon.src}: ${r.status} (${r.headers.get('content-type')})`);
+        html += row(`أيقونة ${icon.src}`, r.ok, r.ok ? `محمّلة (${r.status})` : `فشلت (${r.status})`);
+      } catch (e) {
+        log(`Icon ${icon.src} error: ${e.message}`);
+        html += row(`أيقونة ${icon.src}`, false, 'خطأ في التحميل');
+      }
+    }
+  }
+
+  // 3. Manifest link in document
+  const manifestLink = document.querySelector('link[rel="manifest"]');
+  // نفحص الصفحة الأصلية وليس هذه صفحة التشخيص
+  html += row('<link rel=manifest> (في هذه الصفحة)', !!manifestLink, manifestLink ? manifestLink.href : 'لا يوجد — طبيعي في صفحة التشخيص');
+
+  // 4. Service Worker support & registration
+  const swSupported = 'serviceWorker' in navigator;
+  html += row('Service Worker مدعوم', swSupported, swSupported ? 'مدعوم' : 'غير مدعوم في هذا المتصفح');
+
+  if (swSupported) {
+    try {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      log(`SW registrations found: ${regs.length}`);
+      regs.forEach(r => log(`  scope: ${r.scope}, active: ${!!r.active}`));
+      html += row('SW مسجّل لهذا النطاق', regs.length > 0, regs.length > 0 ? `${regs.length} تسجيل` : 'لا يوجد تسجيل بعد');
+
+      if (regs.length > 0) {
+        const activeSW = regs.find(r => r.active);
+        html += row('SW نشط (Activated)', !!activeSW, activeSW ? 'نشط ✓' : 'لم يُفعَّل بعد');
+      }
+    } catch (e) {
+      log(`SW check error: ${e.message}`);
+    }
+  }
+
+  // 5. beforeinstallprompt support check
+  html += row('beforeinstallprompt (سيظهر لاحقاً إن تأهل)', null, 'انتظر 2-3 ثوانٍ من التفاعل مع الصفحة');
+
+  // 6. Display mode check
+  const standalone = window.matchMedia('(display-mode: standalone)').matches;
+  html += row('يعمل حالياً Standalone؟', standalone, standalone ? 'نعم — مثبّت بالفعل!' : 'لا — يعمل في المتصفح');
+
+  // 7. User Agent info
+  log(`User Agent: ${navigator.userAgent}`);
+  html += row('نوع الجهاز', null, /Android/.test(navigator.userAgent) ? 'Android' : /iPad|iPhone/.test(navigator.userAgent) ? 'iOS' : 'Desktop/Other');
+
+  results.innerHTML = html;
+}
+
+let bipFired = false;
+window.addEventListener('beforeinstallprompt', (e) => {
+  bipFired = true;
+  log('🎉 beforeinstallprompt FIRED! المتصفح اعتبر التطبيق قابلاً للتثبيت.');
+  const div = document.createElement('div');
+  div.className = 'row';
+  div.innerHTML = '<span>beforeinstallprompt</span><span class="ok">✅ أُطلق! اضغط هنا للتثبيت</span>';
+  div.style.cursor = 'pointer';
+  div.onclick = async () => {
+    e.prompt();
+    const choice = await e.userChoice;
+    log('User choice: ' + choice.outcome);
+  };
+  results.appendChild(div);
+});
+
+setTimeout(() => {
+  if (!bipFired) {
+    log('⏱️ بعد 3 ثوانٍ: beforeinstallprompt لم يُطلق بعد. قد يحتاج المزيد من التفاعل أو هناك مشكلة في أحد المعايير أعلاه.');
+  }
+}, 3000);
+
+runDiagnostics();
+</script>
+</body>
+</html>
